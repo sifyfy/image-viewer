@@ -1,10 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use slint::SharedPixelBuffer;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::{cell::RefCell, fs};
 
 slint::slint! {
-    import { Button } from "std-widgets.slint";
+    import { Button, ScrollView } from "std-widgets.slint";
 
     export component MainWindow inherits Window {
         min-width: 200px;
@@ -14,18 +16,33 @@ slint::slint! {
 
         in-out property <image> image;
         in-out property <float> zoom: 1.0;
+        in-out property <string> filename: "";
 
         callback load_image(string);
 
-        VerticalLayout {
-            Image {
-                source: image;
-                width: parent.width * zoom;
-                height: (parent.height - 50px) * zoom;
-                image-fit: contain;
+        vl := VerticalLayout {
+            label := Text {
+                text: filename;
+                x: 25px;
+                height: 50px;
+                vertical-alignment: center;
             }
 
-            HorizontalLayout {
+            sv := ScrollView {
+                width: parent.width;
+                height: parent.height - (label.height + control.height);
+                viewport-width: parent.width * zoom;
+                viewport-height: (parent.height - (label.height + control.height)) * zoom;
+
+                img := Image {
+                    source: image;
+                    width: parent.viewport-width;
+                    height: parent.viewport-height;
+                    image-fit: contain;
+                }
+            }
+
+            control := HorizontalLayout {
                 width: parent.width;
                 height: 50px;
                 alignment: center;
@@ -47,6 +64,14 @@ slint::slint! {
                     }
                 }
                 Button {
+                    text: "Zoom Reset";
+                    clicked => {
+                        zoom = 1.0;
+                        sv.viewport-x = 0;
+                        sv.viewport-y = 0;
+                    }
+                }
+                Button {
                     text: "Next";
                     clicked => { root.load_image("next"); }
                 }
@@ -62,10 +87,10 @@ struct ImageViewer {
 }
 
 impl ImageViewer {
-    fn new(images: Vec<PathBuf>) -> Self {
+    fn new(images: Vec<PathBuf>, current_index: usize) -> Self {
         Self {
             images,
-            current_index: 0,
+            current_index,
         }
     }
 
@@ -97,6 +122,14 @@ impl ImageViewer {
 
         Some(img)
     }
+
+    fn filename(&self) -> String {
+        self.images
+            .get(self.current_index)
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "".to_string())
+    }
 }
 
 fn main() {
@@ -106,42 +139,75 @@ fn main() {
         .unwrap_or(".".to_string())
         .into();
 
-    let images: Vec<PathBuf> = if path.is_dir() {
-        fs::read_dir(path)
-            .unwrap()
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension()?.to_str()?.eq_ignore_ascii_case("png")
-                    || path.extension()?.to_str()?.eq_ignore_ascii_case("jpg")
-                    || path.extension()?.to_str()?.eq_ignore_ascii_case("jpeg")
-                {
-                    Some(path)
-                } else {
-                    None
-                }
-            })
-            .collect()
+    let (image_path, image_dir) = if path.is_dir() {
+        (None, path)
     } else {
-        vec![path]
+        let dir = path
+            .parent()
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| ".".into());
+        (Some(path), dir)
     };
 
-    let viewer = Rc::new(RefCell::new(ImageViewer::new(images)));
+    let images = fs::read_dir(image_dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension()?.to_str()?.eq_ignore_ascii_case("png")
+                || path.extension()?.to_str()?.eq_ignore_ascii_case("jpg")
+                || path.extension()?.to_str()?.eq_ignore_ascii_case("jpeg")
+            {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let image_index = if let Some(image_path) = image_path {
+        images.iter().position(|p| p == &image_path).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let viewer = Rc::new(RefCell::new(ImageViewer::new(images, image_index)));
     let main_window = MainWindow::new().unwrap();
 
     main_window.on_load_image({
         let main_window = main_window.as_weak();
         let viewer = Rc::clone(&viewer);
         move |direction| {
-            if let Some(image) = viewer.borrow_mut().load_image(&direction) {
-                main_window.unwrap().set_image(image);
+            let main_window = main_window.unwrap();
+            if let Some((image, filename)) = load_image_and_filename(&viewer, &direction) {
+                main_window.set_image(image);
+                main_window.set_filename(filename.into());
+            } else {
+                main_window.set_filename("empty".into());
             }
         }
     });
 
-    if let Some(image) = viewer.borrow_mut().load_image("") {
+    if let Some((image, filename)) = load_image_and_filename(&viewer, "") {
         main_window.set_image(image);
+        main_window.set_filename(filename.into());
+    } else {
+        main_window.set_filename("empty".into());
     }
 
     main_window.run().unwrap();
+}
+
+fn load_image_and_filename(
+    viewer: &Rc<RefCell<ImageViewer>>,
+    direction: &str,
+) -> Option<(slint::Image, String)> {
+    viewer
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut v| v.load_image(direction))
+        .and_then(|image| {
+            let filename = viewer.try_borrow().ok()?.filename();
+            Some((image, filename))
+        })
 }
